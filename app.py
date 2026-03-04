@@ -213,16 +213,23 @@ def update_transcript_and_verify(transcript_id: str, update_data: dict) -> tuple
 if not check_authentication():
     st.stop()
 
-# MAIN APP
 st.title("Transcript Review")
 st.caption("Review and approve cleaned transcripts before AI analysis")
 apply_auth_to_db_client()
+
+query_params = st.query_params
+transcript_token = query_params.get("transcript_id") if query_params else None
 
 pending = supabase.table("transcripts") \
     .select("*, projects(project_name, company_name), zoom_meetings(meeting_topic, meeting_date)") \
     .eq("status", "pending_review") \
     .order("created_at", desc=True) \
     .execute()
+
+if transcript_token:
+    pending.data = [t for t in (pending.data or []) if t['id'] == transcript_token] if pending.data else []
+    if pending.data:
+        st.caption(f"🔗 Filtered to transcript: {pending.data[0]['zoom_meetings']['meeting_topic']}")
 
 # logger.info(f"Fetched pending transcripts count: {len(pending.data or [])}")
 
@@ -237,196 +244,173 @@ if not pending.data:
     else:
         st.warning("No transcripts are visible to this logged-in user. This is usually an RLS policy issue.")
     st.stop()
-
-st.info(f"**{len(pending.data)} transcript(s)** pending review")
-
 transcript_options = {
     f"{t['zoom_meetings']['meeting_topic']} - {t['projects']['company_name']}": t['id']
     for t in pending.data
 }
 
-selected_label = st.selectbox(
-    "Select a transcript to review:",
-    options=list(transcript_options.keys()),
-    key="transcript_selector"
-)
-
-selected_transcript_id = transcript_options[selected_label]
-transcript = next((t for t in pending.data if t['id'] == selected_transcript_id), None)
+if transcript_token and pending.data:
+    transcript = next((t for t in pending.data if t['id'] == transcript_token), None)
+else:
+    transcript = pending.data[0] if pending.data else None
 
 if transcript:
-    # TRANSCRIPT REVIEW INTERFACE
     st.divider()
-    col_header, col_meta = st.columns([3, 1])
+    meeting_date = datetime.fromisoformat(transcript['zoom_meetings']['meeting_date'].replace('Z', '+00:00'))
     
-    with col_header:
-        st.subheader(f"{transcript['zoom_meetings']['meeting_topic']}")
-        st.write(f"**Project:** {transcript['projects']['project_name']} - {transcript['projects']['company_name']}")
+    detail_col1, detail_col2, detail_col3, detail_col4 = st.columns(4)
+    with detail_col1:
+        st.markdown(f"**Date:** {meeting_date.strftime('%b %d, %Y')}")
+    with detail_col2:
+        st.markdown(f"**Topic:** {transcript['zoom_meetings']['meeting_topic']}")
+    with detail_col3:
+        st.markdown(f"**Project:** {transcript['projects']['project_name']}")
+    with detail_col4:
+        st.markdown(f"**Company:** {transcript['projects']['company_name']}")
     
-    with col_meta:
-        meeting_date = datetime.fromisoformat(transcript['zoom_meetings']['meeting_date'].replace('Z', '+00:00'))
-        st.metric("Date", meeting_date.strftime("%b %d, %Y"))
-    st.write("📁 **Files:**")
-    col1, col2 = st.columns(2)
-    with col1:
+    st.markdown("")
+    
+    file_col1, file_col2 = st.columns(2)
+    with file_col1:
         if transcript.get('original_transcript_url'):
-            st.markdown(f"[Original Transcript]({transcript['original_transcript_url']})")
-    with col2:
+            st.markdown(f"🔗 [Original Transcript]({transcript['original_transcript_url']})")
+    with file_col2:
         if transcript.get('cleaned_transcript_url'):
-            st.markdown(f"[Cleaned Transcript]({transcript['cleaned_transcript_url']})")
+            st.markdown(f"🔗 [Cleaned Transcript]({transcript['cleaned_transcript_url']})")
     
-    st.markdown("---")
-    
-    st.subheader("Compare & Edit")
-    
-    col_original, col_cleaned = st.columns(2)
+    st.divider()
+    col_original, col_cleaned = st.columns(2, gap="medium")
     
     with col_original:
         st.markdown("### Original Transcript")
-        st.caption("Raw transcript from Zoom")
-        
         original_text = st.text_area(
             "Original",
             value=transcript.get('original_text', 'Loading...'),
-            height=400,
+            height=550,
             disabled=True,
             key=f"original_{transcript['id']}",
             label_visibility="collapsed"
         )
     
     with col_cleaned:
-        st.markdown("### Cleaned Transcript")
-        st.caption("Edited by AI - you can make changes below")
-        
+        st.markdown("### Cleaned Transcript (Editable)")
         edited_text = st.text_area(
             "Cleaned (editable)",
             value=transcript.get('cleaned_text', 'Loading...'),
-            height=400,
+            height=550,
             key=f"cleaned_{transcript['id']}",
             label_visibility="collapsed"
         )
     
-    if transcript.get('original_text') and transcript.get('cleaned_text'):
-        orig_len = len(transcript['original_text'])
-        clean_len = len(transcript['cleaned_text'])
-        change_pct = abs(orig_len - clean_len) / orig_len * 100
-        
-        stat_col1, stat_col2, stat_col3 = st.columns(3)
-        with stat_col1:
-            st.metric("Original Length", f"{orig_len:,} chars")
-        with stat_col2:
-            st.metric("Cleaned Length", f"{clean_len:,} chars")
-        with stat_col3:
-            st.metric("Change", f"{change_pct:.1f}%")
+    st.divider()
+    action_col1, action_col2, spacer = st.columns([1, 1, 2])
+    
+    approve_clicked = False
+    draft_clicked = False
+    
+    with action_col1:
+        approve_clicked = st.button(
+            "Approve",
+            key=f"approve_{transcript['id']}",
+            type="primary",
+            use_container_width=True
+        )
+    
+    with action_col2:
+        draft_clicked = st.button(
+            "Save Draft",
+            key=f"draft_{transcript['id']}",
+            use_container_width=True
+        )
     
     st.markdown("---")
     review_notes = st.text_area(
         "Review Notes (optional)",
         placeholder="Add any notes about changes you made or issues found...",
         key=f"notes_{transcript['id']}",
-        height=100
+        height=80
     )
-    
-    st.markdown("---")
-    
-    action_col1, action_col2 = st.columns(2)
-    
-    with action_col1:
-        if st.button(
-            "Approve",
-            key=f"approve_{transcript['id']}",
-            type="primary",
-            use_container_width=True
-        ):
-            user_made_edits = edited_text != transcript.get('cleaned_text')
-            final_text = edited_text if edited_text is not None else transcript.get('cleaned_text')
-            reviewer_email = st.session_state.get("auth_user_email", "")
-            timestamp = datetime.now().isoformat()
+    if approve_clicked:
+        user_made_edits = edited_text != transcript.get('cleaned_text')
+        final_text = edited_text if edited_text is not None else transcript.get('cleaned_text')
+        reviewer_email = st.session_state.get("auth_user_email", "")
+        timestamp = datetime.now().isoformat()
 
-            update_data = {
-                "status": "approved",
-                "cleaned_text": final_text,
-                "final_text": final_text,
-                "reviewed_at": timestamp,
-                "approved_at": timestamp,
-                "review_notes": review_notes if review_notes else None,
-                "user_edited": user_made_edits
-            }
+        update_data = {
+            "status": "approved",
+            "cleaned_text": final_text,
+            "final_text": final_text,
+            "reviewed_at": timestamp,
+            "approved_at": timestamp,
+            "review_notes": review_notes if review_notes else None,
+            "user_edited": user_made_edits
+        }
 
-            final_file_name = "Unknown(final).txt"
-            meeting_id = transcript.get('zoom_meeting_id')
-            if meeting_id:
-                try:
-                    file_name_response = (
-                        supabase.table("zoom_files")
-                        .select("renamed_file_name, drive_folder_url")
-                        .eq("meeting_id", meeting_id)
-                        .order("created_at", desc=True)
-                        .limit(1)
-                        .execute()
-                    )
-                    file_rows = file_name_response.data or []
-                    source_name = (file_rows[0].get("renamed_file_name") if file_rows else "") or ""
-                    folder_url = file_rows[0].get("drive_folder_url") if file_rows else None
-                    if source_name:
-                        base_name = os.path.splitext(os.path.basename(source_name.strip()))[0]
-                        final_file_name = f"{base_name}(final).txt"
-                        logger.info(f"[APPROVE] Built final_file_name: {final_file_name}")
-                except Exception as exc:
-                    logger.error(f"[APPROVE] Exception in file lookup: {exc}", exc_info=True)
+        final_file_name = "Unknown(final).txt"
+        folder_url = None
+        meeting_id = transcript.get('zoom_meeting_id')
+        if meeting_id:
             try:
-                save_ok, save_message = update_transcript_and_verify(transcript['id'], update_data)
-                if not save_ok:
-                    st.error(save_message)
-                    st.stop()
-
-                payload = {
-                    "transcript_id": transcript['id'],
-                    "project_id": transcript.get('project_id'),
-                    "meeting_id": transcript.get('zoom_meeting_id'),
-                    "final_transcript_text": final_text,
-                    "final_text": final_text,
-                    "cleaned_text": final_text,
-                    "status": "approved",
-                    "user_edited": user_made_edits,
-                    "approved_at": timestamp,
-                    "file_name": final_file_name,
-                    "folder_url": folder_url,
-                }
-
-                workflow_ok, workflow_message = trigger_workflow_5(payload)
-                if workflow_ok:
-                    st.success("Transcript approved and Workflow 5 triggered.")
-                else:
-                    st.warning(f"Transcript approved, but {workflow_message}")
-
-                st.balloons()
-                st.rerun()
+                file_name_response = (
+                    supabase.table("zoom_files")
+                    .select("renamed_file_name, drive_folder_url")
+                    .eq("meeting_id", meeting_id)
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                file_rows = file_name_response.data or []
+                source_name = (file_rows[0].get("renamed_file_name") if file_rows else "") or ""
+                folder_url = file_rows[0].get("drive_folder_url") if file_rows else None
+                if source_name:
+                    base_name = os.path.splitext(os.path.basename(source_name.strip()))[0]
+                    final_file_name = f"{base_name}(final).txt"
+                    logger.info(f"[APPROVE] Built final_file_name: {final_file_name}")
             except Exception as exc:
-                st.error(f"Approve failed: {exc}")
-    
-    with action_col2:
-        if st.button(
-            "Save Draft",
-            key=f"draft_{transcript['id']}",
-            use_container_width=True
-        ):
-            draft_data = {
-                "cleaned_text": edited_text,
-                "review_notes": review_notes,
-                "reviewed_at": datetime.now().isoformat()
+                logger.error(f"[APPROVE] Exception in file lookup: {exc}", exc_info=True)
+        try:
+            save_ok, save_message = update_transcript_and_verify(transcript['id'], update_data)
+            if not save_ok:
+                st.error(save_message)
+                st.stop()
+
+            payload = {
+                "transcript_id": transcript['id'],
+                "project_id": transcript.get('project_id'),
+                "meeting_id": transcript.get('zoom_meeting_id'),
+                "final_transcript_text": final_text,
+                "final_text": final_text,
+                "cleaned_text": final_text,
+                "status": "approved",
+                "user_edited": user_made_edits,
+                "approved_at": timestamp,
+                "file_name": final_file_name,
+                "folder_url": folder_url,
             }
 
-            draft_ok, draft_message = update_transcript_and_verify(transcript['id'], draft_data)
-            if draft_ok:
-                st.success("Changes saved as draft.")
+            workflow_ok, workflow_message = trigger_workflow_5(payload)
+            if workflow_ok:
+                st.success("Transcript approved and Workflow 5 triggered.")
             else:
-                st.error(draft_message)
+                st.warning(f"Transcript approved, but {workflow_message}")
+
+            st.balloons()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Approve failed: {exc}")
     
-    if review_notes:
-        with st.expander("Review History"):
-            st.write(f"**Last Review:** {transcript.get('reviewed_at', 'N/A')[:19]}")
-            st.write(f"**Notes:** {review_notes}")
+    if draft_clicked:
+        draft_data = {
+            "cleaned_text": edited_text,
+            "review_notes": review_notes,
+            "reviewed_at": datetime.now().isoformat()
+        }
+
+        draft_ok, draft_message = update_transcript_and_verify(transcript['id'], draft_data)
+        if draft_ok:
+            st.success("Changes saved as draft.")
+        else:
+            st.error(draft_message)
 
 # Sidebar(Logout)
 st.sidebar.title("Settings")
