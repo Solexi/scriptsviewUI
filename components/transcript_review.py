@@ -109,8 +109,7 @@ def render_transcript_review(supabase: Client, transcript: dict, workflow_webhoo
         "Review Notes (optional)",
         placeholder="Add any notes about changes you made or issues found...",
         key=f"notes_{transcript['id']}",
-        height=80,
-        width=680
+        height=80
     )
 
     if approve_clicked:
